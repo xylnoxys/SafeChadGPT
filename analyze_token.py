@@ -8,7 +8,6 @@ web3 = Web3(Web3.HTTPProvider(ETH_RPC))
 
 DEAD = "0x000000000000000000000000000000000000dEaD"
 ZERO = "0x0000000000000000000000000000000000000000"
-UNIV3_NFT_MANAGER = "0xc36442b4a4522e871399cd717abdd847ab11fe88"
 UNIV2_FACTORY = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
 UNIV2_INIT_CODE_HASH = "0x96e8ac427619fd76c75fb150e68b7bff3dc8fa02043a1e3cc2c5c7e1e77ce9d5"
 
@@ -24,7 +23,7 @@ def get_token_info(address):
         "name": info.get("ContractName", "Unknown"),
         "symbol": info.get("Symbol", "???"),
         "verified": info.get("ABI") not in ("", "Contract source code not verified"),
-        "owner": info.get("Owner", "").lower()
+        "owner": info.get("Owner", "Unknown").lower()
     }
 
 def get_total_supply(address):
@@ -45,14 +44,26 @@ def get_balance_of(address, wallet):
     except:
         return 0
 
-def check_tax(address, decimals=18):
+def check_owner_status(address):
     try:
-        w1 = web3.eth.account.create()
-        w2 = web3.eth.account.create()
+        contract = web3.eth.contract(address=Web3.toChecksumAddress(address), abi=[
+            {"constant": True, "inputs": [], "name": "owner", "outputs": [{"name": "", "type": "address"}], "type": "function"}
+        ])
+        owner = contract.functions.owner().call().lower()
+        if owner in [DEAD.lower(), ZERO.lower()]:
+            return "Renounced"
+        return owner
+    except:
+        return "Unknown"
+
+def check_tax(address):
+    try:
         token = web3.eth.contract(address=Web3.toChecksumAddress(address), abi=[
             {"constant": False, "inputs": [{"name": "to", "type": "address"}, {"name": "value", "type": "uint256"}], "name": "transfer", "outputs": [{"name": "", "type": "bool"}], "type": "function"}
         ])
-        amt = 100 * (10 ** decimals)
+        w1 = web3.eth.account.create()
+        w2 = web3.eth.account.create()
+        amt = 10**18
         gas = token.functions.transfer(w2.address, amt).estimate_gas({'from': w1.address})
         return f"🧾 Transfer gas: {gas} (No obvious tax)"
     except:
@@ -111,8 +122,9 @@ def analyze_token(address):
         total_supply = get_total_supply(address)
         burned = get_balance_of(address, DEAD) + get_balance_of(address, ZERO)
         burned_pct = (burned / total_supply) * 100 if total_supply else 0
+        circulating = total_supply - burned
 
-        renounced = info["owner"] in [DEAD, ZERO]
+        renounced = check_owner_status(address)
         verified = info["verified"]
         tax = check_tax(address)
         v2_lp = get_univ2_lp_status(address)
@@ -120,7 +132,7 @@ def analyze_token(address):
 
         safe = all([
             verified,
-            renounced,
+            renounced == "Renounced",
             burned_pct > 1,
             "✅" in v2_lp or "✅" in v3_lp,
             "⚠️" not in tax
@@ -130,9 +142,10 @@ def analyze_token(address):
         return f"""{emoji} {info['name']} ({info['symbol']})
 
 🔹 Contract: `{address}`
-🔐 Verified: {"✅ Yes" if verified else "❌ No"}
-👨‍💻 Owner: {"Renounced" if renounced else info['owner'] or "Unknown"}
+🔐 Verified: {'✅ Yes' if verified else '❌ No'}
+👨‍💻 Owner: {renounced}
 🔥 Burned Supply: {burned_pct:.2f}%
+💠 Circulating: {circulating / (10**18):,.2f}
 {v2_lp}
 {v3_lp}
 {tax}
