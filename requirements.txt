@@ -3,3 +3,4 @@ requests==2.31.0
 web3==6.10.0
 python-dotenv==1.0.1
 flask==2.3.3
+setuptools
