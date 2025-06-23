@@ -9,10 +9,8 @@ web3 = Web3(Web3.HTTPProvider(ETH_RPC))
 DEAD = "0x000000000000000000000000000000000000dEaD"
 ZERO = "0x0000000000000000000000000000000000000000"
 WETH = Web3.to_checksum_address("0xC02aaA39b223FE8D0A0E5C4F27eAD9083C756Cc2")
-UNIV2_FACTORY = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+UNIV2_FACTORY = Web3.to_checksum_address("0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f")
 UNIV2_INIT_CODE_HASH = "0x96e8ac427619fd76c75fb150e68b7bff3dc8fa02043a1e3cc2c5c7e1e77ce9d5"
-TEAMFINANCE_API = "https://api.team.finance/proxy/v1/mainnet/lock/token/"
-
 
 def get_token_info(address):
     res = requests.get("https://api.etherscan.io/api", params={
@@ -29,7 +27,6 @@ def get_token_info(address):
         "owner": info.get("Owner", "").lower()
     }
 
-
 def get_total_supply(address):
     try:
         token = web3.eth.contract(address=Web3.to_checksum_address(address), abi=[
@@ -39,7 +36,6 @@ def get_total_supply(address):
     except:
         return 0
 
-
 def get_balance_of(address, wallet):
     try:
         token = web3.eth.contract(address=Web3.to_checksum_address(address), abi=[
@@ -48,7 +44,6 @@ def get_balance_of(address, wallet):
         return token.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
     except:
         return 0
-
 
 def check_tax(address, decimals=18):
     try:
@@ -63,49 +58,74 @@ def check_tax(address, decimals=18):
     except:
         return "⚠️ Possible honeypot or high tax"
 
-
-def get_univ2_pair_address(token):
-    token0, token1 = sorted([token.lower(), WETH.lower()])
-    salt = Web3.solidity_keccak(['address', 'address'], [token0, token1])
-    raw = Web3.solidity_keccak(['bytes', 'address', 'bytes32', 'bytes32'], [
-        b'\xff',
-        Web3.to_checksum_address(UNIV2_FACTORY),
-        salt,
-        bytes.fromhex(UNIV2_INIT_CODE_HASH[2:])
-    ])
-    return Web3.to_checksum_address(raw[-20:].hex())
-
-
-def get_lp_lock_status(pair_address):
+def get_univ2_lp_status(token_address):
     try:
-        resp = requests.get(TEAMFINANCE_API + pair_address).json()
-        if resp.get("data"):
-            total_locked = sum(int(lock['amount']) for lock in resp['data'])
-            return f"🔒 LP Locked via TeamFinance ({total_locked // 1e18:.2f} tokens)"
-        return "⚠️ LP not locked"
+        token0 = Web3.to_checksum_address(token_address)
+        token1 = WETH
+        sorted_tokens = sorted([token0, token1])
+        salt = Web3.solidity_keccak(['address', 'address'], sorted_tokens)
+        raw = Web3.solidity_keccak(['bytes', 'address', 'bytes32'], [
+            b'\xff',
+            UNIV2_FACTORY,
+            salt,
+            bytes.fromhex(UNIV2_INIT_CODE_HASH[2:])
+        ])
+        pair_address = Web3.to_checksum_address(raw[-20:].hex())
+        lp_balance = get_balance_of(pair_address, DEAD) + get_balance_of(pair_address, ZERO)
+        total_lp = get_total_supply(pair_address)
+        burned_pct = (lp_balance / total_lp) * 100 if total_lp > 0 else 0
+        if burned_pct > 90:
+            return f"✅ V2 LP burned ({burned_pct:.1f}%)"
+        elif burned_pct > 0:
+            return f"🔒 V2 LP partially burned ({burned_pct:.1f}%)"
+        else:
+            return f"⚠️ V2 LP not burned (0%)"
     except:
-        return "❓ LP lock status unknown"
+        return "❓ V2 LP unknown"
 
+def get_univ3_lp_status(token_address):
+    try:
+        query = {
+            "query": f"""
+            {{
+              pools(where: {{
+                token0: "{token_address.lower()}"
+              }}, first: 1, orderBy: totalValueLockedUSD, orderDirection: desc) {{
+                id
+                liquidity
+              }}
+            }}
+            """
+        }
+        res = requests.post("https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3", json=query).json()
+        pools = res.get("data", {}).get("pools", [])
+        if not pools:
+            return "❌ No V3 pool found"
+        pool = pools[0]
+        if int(pool['liquidity']) == 0:
+            return "✅ V3 LP burned"
+        return f"⚠️ V3 LP exists (liquidity > 0)"
+    except:
+        return "❓ V3 LP unknown"
 
 def analyze_token(address):
     try:
-        address = Web3.to_checksum_address(address)
         info = get_token_info(address)
         total_supply = get_total_supply(address)
         burned = get_balance_of(address, DEAD) + get_balance_of(address, ZERO)
         burned_pct = (burned / total_supply) * 100 if total_supply else 0
-        renounced = info["owner"] in [DEAD.lower(), ZERO.lower()]
+
+        renounced = info["owner"] in [DEAD, ZERO]
         verified = info["verified"]
         tax = check_tax(address)
-
-        pair_address = get_univ2_pair_address(address)
-        lp_lock = get_lp_lock_status(pair_address)
+        v2_lp = get_univ2_lp_status(address)
+        v3_lp = get_univ3_lp_status(address)
 
         safe = all([
             verified,
             renounced,
             burned_pct > 1,
-            "🔒" in lp_lock,
+            "✅" in v2_lp or "✅" in v3_lp,
             "⚠️" not in tax
         ])
 
@@ -113,10 +133,11 @@ def analyze_token(address):
         return f"""{emoji} {info['name']} ({info['symbol']})
 
 🔹 Contract: `{address}`
-🔐 Verified: {'✅ Yes' if verified else '❌ No'}
-👨‍💻 Owner: {'Renounced' if renounced else info['owner'] or 'Unknown'}
+🔐 Verified: {"✅ Yes" if verified else "❌ No"}
+👨‍💻 Owner: {"Renounced" if renounced else info['owner'] or "Unknown"}
 🔥 Burned Supply: {burned_pct:.2f}%
-{lp_lock}
+{v2_lp}
+{v3_lp}
 {tax}
 
 📜 https://etherscan.io/address/{address}
